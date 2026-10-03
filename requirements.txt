@@ -1,0 +1,14 @@
+wagtail>=6.2,<7.0
+django>=5.0,<5.3
+psycopg2-binary>=2.9   # PostgreSQL (facultatif si vous utilisez SQLite en dev)
+Pillow>=10.0
+gunicorn>=22.0
+whitenoise>=6.6
+
+# Référencement (SEO) : balises meta, Open Graph, Twitter Card, données
+# structurées Schema.org
+wagtail-seo>=3.0
+
+# Génération du contrat de location en PDF (app 'calendrier')
+reportlab>=4.0
+pypdf>=5.0

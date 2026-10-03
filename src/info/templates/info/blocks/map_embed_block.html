@@ -1,0 +1,23 @@
+{% if url_carte %}
+<div class="carte-google-maps fade-up">
+    {% if value.titre %}<h3>{{ value.titre }}</h3>{% endif %}
+    <iframe
+        src="{{ url_carte }}"
+        width="100%"
+        height="{{ value.hauteur|default:450 }}"
+        style="border:0;"
+        loading="lazy"
+        referrerpolicy="no-referrer-when-downgrade"
+        title="{{ value.titre|default:'Carte' }}">
+    </iframe>
+</div>
+{% else %}
+    {% if request.user.is_staff %}
+        <p class="carte-google-maps__erreur">
+            ⚠️ Impossible d'extraire une adresse valide du code fourni pour la carte
+            Google Maps. Vérifiez qu'il s'agit bien du code d'intégration (bouton
+            Partager → Intégrer une carte) ou d'une adresse commençant par « http ».
+            (Ce message n'est visible que par les administrateurs connectés.)
+        </p>
+    {% endif %}
+{% endif %}

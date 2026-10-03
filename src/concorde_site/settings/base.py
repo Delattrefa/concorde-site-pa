@@ -8,7 +8,7 @@ import environ
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-env = environ.ENV()
+env = environ.Env()
 environ.Env.read_env(env_file=str(BASE_DIR / "concorde_site" / "settings" / ".env"))
 
 SECRET_KEY = env("SECRET_KEY")

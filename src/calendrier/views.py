@@ -11,6 +11,7 @@ Organisation (méthode CRUD) :
                         Delete (admin).
 """
 from datetime import date, datetime
+from urllib.parse import urlencode
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, user_passes_test
@@ -19,6 +20,7 @@ from django.core.exceptions import PermissionDenied
 from django.core.files.base import ContentFile
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.db.models import Q, Sum
 from django.urls import reverse, reverse_lazy
 from django.views import View
 from django.views.decorators.http import require_POST
@@ -28,7 +30,7 @@ from django.utils.dates import MONTHS, WEEKDAYS
 from django.utils import timezone
 
 from .contrats import VARIABLES_DISPONIBLES, AIDE_MISE_EN_FORME, generer_pdf_contrat, nom_fichier_contrat
-from .forms import ActiviteForm, AnnexeContratForm, ReservationAdminForm, ArticleContratForm, ContratLocationForm, ReservationForm
+from .forms import ActiviteForm, AnnexeContratForm, ReservationAdminForm, SuiviPaiementFormSet, ArticleContratForm, ContratLocationForm, ReservationForm
 from .models import Activite, AnnexeContrat, ArticleContrat, ContratLocation, Reservation
 from .utils import construire_semaines_du_mois, mois_adjacent
 
@@ -666,3 +668,118 @@ class AnnexeContratDeleteView(_ContratTypeMixin, DeleteView):
             stockage.delete(nom_fichier)
         messages.success(self.request, f"L'annexe « {titre} » a été supprimée.")
         return reponse
+
+
+# ---------------------------------------------------------------------------
+# SUIVI DES PAIEMENTS : location, caution et remboursement (administrateurs)
+# ---------------------------------------------------------------------------
+FILTRES_PAIEMENTS = [
+    ("", "Toutes les locations"),
+    ("a_payer", "Paiement attendu"),
+    ("a_rembourser", "Caution à rembourser"),
+    ("soldees", "Dossiers clôturés"),
+]
+
+
+def _lire_date(valeur):
+    """Date AAAA-MM-JJ (champ <input type="date">) ou None si vide/invalide."""
+    try:
+        return datetime.strptime(valeur, "%Y-%m-%d").date() if valeur else None
+    except ValueError:
+        return None
+
+
+def _contrats_recherches(nom, date_du, date_au):
+    """Contrats correspondant à la recherche : nom ou prénom du locataire
+    (partiel, sans tenir compte des majuscules) et/ou locations qui
+    chevauchent la période [date_du, date_au] (bornes facultatives)."""
+    contrats = ContratLocation.objects.select_related("reservation")
+    for mot in nom.split():
+        contrats = contrats.filter(
+            Q(reservation__nom__icontains=mot) | Q(reservation__prenom__icontains=mot)
+        )
+    if date_du:
+        contrats = contrats.filter(reservation__date_fin__gte=date_du)
+    if date_au:
+        contrats = contrats.filter(reservation__date_debut__lte=date_au)
+    return contrats
+
+
+def _filtrer_statut(contrats, filtre):
+    if filtre == "a_payer":
+        contrats = contrats.filter(Q(location_payee=False) | Q(caution_payee=False))
+    elif filtre == "a_rembourser":
+        contrats = contrats.filter(caution_payee=True, caution_remboursee=False)
+    elif filtre == "soldees":
+        contrats = contrats.filter(location_payee=True, caution_payee=True, caution_remboursee=True)
+    return contrats.order_by("-reservation__date_debut", "-pk")
+
+
+@user_passes_test(_est_administrateur, login_url="login")
+def suivi_paiements(request):
+    """Tableau de suivi des paiements des locations de salle : une ligne
+    par contrat généré, avec le montant de la location et de la caution
+    (repris du contrat) et les informations de paiement à compléter.
+    Un seul bouton enregistre toutes les lignes modifiées."""
+
+    filtre = request.GET.get("filtre", "")
+    if filtre not in dict(FILTRES_PAIEMENTS):
+        filtre = ""
+
+    # --- Recherche : nom et/ou fourchette de dates ------------------------
+    nom = request.GET.get("nom", "").strip()
+    date_du = _lire_date(request.GET.get("du", ""))
+    date_au = _lire_date(request.GET.get("au", ""))
+    if date_du and date_au and date_au < date_du:
+        date_du, date_au = date_au, date_du
+    recherche_active = bool(nom or date_du or date_au)
+
+    selection = _contrats_recherches(nom, date_du, date_au)
+    contrats = _filtrer_statut(selection, filtre)
+
+    # Paramètres de recherche conservés dans les liens de filtre
+    params_recherche = urlencode({
+        cle: valeur for cle, valeur in (
+            ("nom", nom),
+            ("du", date_du.isoformat() if date_du else ""),
+            ("au", date_au.isoformat() if date_au else ""),
+        ) if valeur
+    })
+
+    if request.method == "POST":
+        formset = SuiviPaiementFormSet(request.POST, queryset=contrats)
+        if formset.is_valid():
+            modifies = formset.save()
+            if modifies:
+                messages.success(
+                    request,
+                    f"{len(modifies)} ligne(s) enregistrée(s)."
+                    if len(modifies) > 1 else "1 ligne enregistrée.",
+                )
+            else:
+                messages.info(request, "Aucune modification à enregistrer.")
+            # On revient sur la même page, avec la même recherche et le même filtre.
+            return redirect(request.get_full_path())
+        messages.error(request, "Certaines lignes contiennent des erreurs : rien n'a été enregistré.")
+    else:
+        formset = SuiviPaiementFormSet(queryset=contrats)
+
+    # Totaux : sur la recherche en cours (nom / période), sinon sur tout.
+    totaux = {
+        "locations_encaissees": selection.filter(location_payee=True).aggregate(t=Sum("montant_location"))["t"] or 0,
+        "locations_attendues": selection.filter(location_payee=False).aggregate(t=Sum("montant_location"))["t"] or 0,
+        "cautions_detenues": selection.filter(caution_payee=True, caution_remboursee=False).aggregate(t=Sum("montant_caution"))["t"] or 0,
+    }
+
+    return render(request, "calendrier/suivi_paiements.html", {
+        "formset": formset,
+        "filtre": filtre,
+        "filtres": FILTRES_PAIEMENTS,
+        "totaux": totaux,
+        "nom": nom,
+        "date_du": date_du,
+        "date_au": date_au,
+        "recherche_active": recherche_active,
+        "params_recherche": params_recherche,
+        "nb_resultats": contrats.count(),
+    })

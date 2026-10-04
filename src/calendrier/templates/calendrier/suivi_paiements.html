@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Suivi des paiements des locations{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'calendrier/css/calendrier.css' %}">
+{% endblock %}
+
+{% block content %}
+<section class="page-header fade-target">
+    <div class="wrap">
+        <p class="breadcrumb"><a href="{% url 'calendrier:reservation_liste' %}">← Retour aux demandes de réservation</a></p>
+        <h1>Suivi des paiements</h1>
+        <p class="page-header__intro">
+            Une ligne par contrat de location généré. Les montants proviennent du
+            contrat ; cochez les paiements et complétez les dates et numéros
+            d'extrait, puis enregistrez.
+        </p>
+    </div>
+</section>
+
+<section class="calendrier-liste paiements wrap">
+    {% if messages %}
+        <ul class="messages">
+            {% for message in messages %}
+                <li class="message message--{{ message.tags }}">{{ message }}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+
+    <form method="get" class="paiements__recherche" role="search">
+        {% if filtre %}<input type="hidden" name="filtre" value="{{ filtre }}">{% endif %}
+        <label class="paiements__recherche-champ paiements__recherche-champ--nom">
+            <span>Nom ou prénom</span>
+            <input type="search" name="nom" value="{{ nom }}" class="champ-texte" placeholder="Ex : Dupont">
+        </label>
+        <label class="paiements__recherche-champ">
+            <span>Location du</span>
+            <input type="date" name="du" value="{{ date_du|date:'Y-m-d' }}" class="champ-texte">
+        </label>
+        <label class="paiements__recherche-champ">
+            <span>au</span>
+            <input type="date" name="au" value="{{ date_au|date:'Y-m-d' }}" class="champ-texte">
+        </label>
+        <div class="paiements__recherche-boutons">
+            <button type="submit" class="btn btn--secondary">Rechercher</button>
+            {% if recherche_active %}
+                <a class="paiements__effacer" href="{% url 'calendrier:suivi_paiements' %}{% if filtre %}?filtre={{ filtre }}{% endif %}">Effacer la recherche</a>
+            {% endif %}
+        </div>
+    </form>
+
+    {% if recherche_active %}
+        <p class="paiements__resume">
+            {{ nb_resultats }} location{{ nb_resultats|pluralize }} trouvée{{ nb_resultats|pluralize }}
+            {% if nom %} pour « {{ nom }} »{% endif %}
+            {% if date_du and date_au %} entre le {{ date_du|date:"d/m/Y" }} et le {{ date_au|date:"d/m/Y" }}{% elif date_du %} à partir du {{ date_du|date:"d/m/Y" }}{% elif date_au %} jusqu'au {{ date_au|date:"d/m/Y" }}{% endif %}.
+            Les totaux ci-dessous portent sur cette recherche.
+        </p>
+    {% endif %}
+
+    <div class="paiements__totaux">
+        <div><span>Locations encaissées</span><strong>{{ totaux.locations_encaissees|floatformat:2 }} €</strong></div>
+        <div><span>Locations à encaisser</span><strong>{{ totaux.locations_attendues|floatformat:2 }} €</strong></div>
+        <div><span>Cautions à rembourser</span><strong>{{ totaux.cautions_detenues|floatformat:2 }} €</strong></div>
+    </div>
+
+    <div class="calendrier-liste__filtres">
+        {% for valeur, libelle in filtres %}
+            <a href="{% url 'calendrier:suivi_paiements' %}?{% if valeur %}filtre={{ valeur }}{% if params_recherche %}&amp;{% endif %}{% endif %}{{ params_recherche }}" class="tag {% if filtre == valeur %}tag--active{% endif %}">{{ libelle }}</a>
+        {% endfor %}
+    </div>
+
+    {% if formset.forms %}
+    <form method="post">
+        {% csrf_token %}
+        {{ formset.management_form }}
+        {% if formset.non_form_errors %}{{ formset.non_form_errors }}{% endif %}
+
+        <div class="paiements__barre">
+            <button type="submit" class="btn btn--primary">Enregistrer les modifications</button>
+        </div>
+
+        <table class="calendrier-liste__table paiements__table">
+            <thead>
+                <tr>
+                    <th>Locataire</th>
+                    <th>Location du / au</th>
+                    <th>Location</th>
+                    <th>Caution</th>
+                    <th>Paiement</th>
+                    <th>Remboursement caution</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for form in formset %}
+                    {% with contrat=form.instance reservation=form.instance.reservation %}
+                    <tr class="{% if contrat.est_solde %}paiements__ligne--soldee{% elif form.errors %}paiements__ligne--erreur{% endif %}">
+                        <td data-label="Locataire">
+                            {{ form.id }}
+                            <a href="{% url 'calendrier:reservation_detail' reservation.pk %}"><strong>{{ reservation.nom }}</strong> {{ reservation.prenom }}</a>
+                            {% if contrat.fichier_disponible %}
+                                <a class="paiements__contrat" href="{% url 'calendrier:reservation_contrat_pdf' reservation.pk %}" title="Télécharger le contrat de location (PDF)">📄 Contrat (PDF)</a>
+                            {% else %}
+                                <a class="paiements__contrat paiements__contrat--absent" href="{% url 'calendrier:reservation_contrat' reservation.pk %}" title="Le fichier du contrat est introuvable : le régénérer">⚠ Contrat introuvable — régénérer</a>
+                            {% endif %}
+                            {% if form.non_field_errors %}<div class="paiements__erreur">{{ form.non_field_errors|join:" " }}</div>{% endif %}
+                        </td>
+                        <td data-label="Du / au">
+                            {{ reservation.date_debut|date:"d/m/Y" }}{% if reservation.date_fin != reservation.date_debut %}<br>→ {{ reservation.date_fin|date:"d/m/Y" }}{% endif %}
+                        </td>
+                        <td data-label="Location">
+                            <span class="paiements__montant">{{ contrat.montant_location|floatformat:2 }} €</span>
+                            <label class="paiements__case">{{ form.location_payee }} Payée</label>
+                        </td>
+                        <td data-label="Caution">
+                            <span class="paiements__montant">{{ contrat.montant_caution|floatformat:2 }} €</span>
+                            <label class="paiements__case">{{ form.caution_payee }} Payée</label>
+                            <label class="paiements__case">{{ form.caution_remboursee }} Remboursée</label>
+                            {% if form.caution_remboursee.errors %}<div class="paiements__erreur">{{ form.caution_remboursee.errors|join:" " }}</div>{% endif %}
+                        </td>
+                        <td data-label="Paiement">
+                            <label class="paiements__champ"><span>Date</span>{{ form.date_paiement }}</label>
+                            <label class="paiements__champ"><span>Extrait</span>{{ form.extrait_paiement }}</label>
+                            {% if form.date_paiement.errors %}<div class="paiements__erreur">{{ form.date_paiement.errors|join:" " }}</div>{% endif %}
+                        </td>
+                        <td data-label="Remboursement">
+                            <label class="paiements__champ"><span>Date</span>{{ form.date_remboursement_caution }}</label>
+                            <label class="paiements__champ"><span>Extrait</span>{{ form.extrait_remboursement }}</label>
+                            {% if form.date_remboursement_caution.errors %}<div class="paiements__erreur">{{ form.date_remboursement_caution.errors|join:" " }}</div>{% endif %}
+                        </td>
+                    </tr>
+                    {% endwith %}
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <div class="paiements__barre">
+            <button type="submit" class="btn btn--primary">Enregistrer les modifications</button>
+        </div>
+    </form>
+    {% else %}
+        {% if recherche_active %}
+            <p>Aucune location ne correspond à cette recherche.</p>
+        {% else %}
+            <p>Aucune location dans cette catégorie. Une location apparaît ici dès que son contrat a été généré.</p>
+        {% endif %}
+    {% endif %}
+</section>
+{% endblock %}

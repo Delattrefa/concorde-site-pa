@@ -2,6 +2,8 @@ from django.conf import settings
 from django.urls import include, path
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
+from django.shortcuts import redirect
+from django.templatetags.static import static as url_statique
 
 from wagtail.admin import urls as wagtailadmin_urls
 from wagtail import urls as wagtail_urls
@@ -11,7 +13,13 @@ from search import views as search_views
 from news import views as news_views
 from media_gallery import views as media_gallery_views
 
+def favicon_ico(request):
+    """Certains navigateurs et robots demandent /favicon.ico directement."""
+    return redirect(url_statique("img/favicon.ico"))
+
+
 urlpatterns = [
+    path("favicon.ico", favicon_ico),
     path("django-admin/", admin.site.urls),
     path("admin/", include(wagtailadmin_urls)),
     path("documents/", include(wagtaildocs_urls)),
@@ -69,6 +77,22 @@ if settings.DEBUG:
         ] + urlpatterns
     except ImportError:
         pass
+
+elif getattr(settings, "SERVE_MEDIA", False):
+    # Production (o2switch) : solution de secours si Apache ne sert pas
+    # directement le dossier /media/ (activée par SERVE_MEDIA=1 dans .env).
+    # Les contrats de location sont exclus : ils ne sont accessibles qu'aux
+    # administrateurs, via calendrier:reservation_contrat_pdf.
+    from django.urls import re_path
+    from django.views.static import serve
+
+    urlpatterns += [
+        re_path(
+            r"^media/(?!contrats_location/)(?P<path>.*)$",
+            serve,
+            {"document_root": settings.MEDIA_ROOT},
+        ),
+    ]
 
 
 # Laisser Wagtail gérer toutes les pages non capturées ci-dessus

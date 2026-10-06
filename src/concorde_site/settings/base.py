@@ -4,17 +4,8 @@ Projet : Site vitrine ASBL "La Concorde" (théâtre / activités culturelles)
 """
 import os
 from pathlib import Path
-import environ
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-
-env = environ.Env()
-environ.Env.read_env(env_file=str(BASE_DIR / "concorde_site" / "settings" / ".env"))
-
-SECRET_KEY = env("SECRET_KEY")
-DEBUG = env.bool("DEBUG")
-ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
-
 
 # -----------------------------------------------------------------------
 # Applications
@@ -31,6 +22,7 @@ INSTALLED_APPS = [
     "calendrier",
     "theatre",
     "page_libre",
+    "consentement",
 
     # Wagtail
     "wagtail.contrib.forms",
@@ -76,6 +68,8 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "wagtail.contrib.redirects.middleware.RedirectMiddleware",
+    # Bloque les contenus de sites tiers (cartes, vidéos) avant consentement
+    "consentement.middleware.BlocageContenusTiersMiddleware",
 ]
 
 ROOT_URLCONF = "concorde_site.urls"

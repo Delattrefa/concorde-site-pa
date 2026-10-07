@@ -15,6 +15,8 @@ plutôt qu'une date unique avec horaires : une activité ou une réservation
 peut ainsi couvrir un seul jour (date_debut == date_fin) ou plusieurs jours
 consécutifs.
 """
+from datetime import timedelta
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator
@@ -192,6 +194,67 @@ class Reservation(models.Model):
         return self.statut == self.STATUT_VALIDEE
 
 
+# ---------------------------------------------------------------------------
+# DISPONIBILITÉ DE LA SALLE
+# Une date est « prise » si une réservation validée ou une activité l'occupe.
+# Règles :
+#  - demande publique : refusée sur une date prise ;
+#  - réservation encodée par un administrateur : acceptée, mais mise en
+#    attente si la date est prise (liste d'attente en cas d'annulation) ;
+#  - activité : refusée seulement si une réservation validée occupe la date
+#    (plusieurs activités peuvent partager une même date).
+# ---------------------------------------------------------------------------
+def reservations_validees_sur(debut, fin, exclure=None):
+    """Réservations validées qui chevauchent la période [debut, fin]."""
+    qs = Reservation.objects.filter(
+        statut=Reservation.STATUT_VALIDEE, date_debut__lte=fin, date_fin__gte=debut
+    )
+    return qs.exclude(pk=exclure) if exclure else qs
+
+
+def activites_sur(debut, fin, exclure=None):
+    """Activités qui chevauchent la période [debut, fin]."""
+    qs = Activite.objects.filter(date_debut__lte=fin, date_fin__gte=debut)
+    return qs.exclude(pk=exclure) if exclure else qs
+
+
+def demandes_en_attente_sur(debut, fin, exclure=None):
+    """Demandes de réservation en attente sur la période (liste d'attente)."""
+    qs = Reservation.objects.filter(
+        statut=Reservation.STATUT_ATTENTE, date_debut__lte=fin, date_fin__gte=debut
+    ).order_by("date_demande")
+    return qs.exclude(pk=exclure) if exclure else qs
+
+
+def jours_occupes(debut, fin, exclure_reservation=None):
+    """Jours de la période [debut, fin] où la salle est déjà prise."""
+    occupations = list(reservations_validees_sur(debut, fin, exclure_reservation)) + list(
+        activites_sur(debut, fin)
+    )
+    jours = set()
+    for occupation in occupations:
+        jour = max(debut, occupation.date_debut)
+        while jour <= min(fin, occupation.date_fin):
+            jours.add(jour)
+            jour += timedelta(days=1)
+    return sorted(jours)
+
+
+def occupations_sur(debut, fin, exclure_reservation=None):
+    """Description lisible (pour les administrateurs) de ce qui occupe la période."""
+    textes = [
+        f"location de {r.prenom} {r.nom} ({r.date_debut:%d/%m/%Y}"
+        + (f" au {r.date_fin:%d/%m/%Y}" if r.date_fin != r.date_debut else "") + ")"
+        for r in reservations_validees_sur(debut, fin, exclure_reservation)
+    ]
+    textes += [
+        f"activité « {a.nom} » ({a.date_debut:%d/%m/%Y}"
+        + (f" au {a.date_fin:%d/%m/%Y}" if a.date_fin != a.date_debut else "") + ")"
+        for a in activites_sur(debut, fin)
+    ]
+    return textes
+
+
 class ContratLocation(models.Model):
     """Contrat de location de salle généré (en PDF) pour une réservation
     validée. Un seul contrat par réservation (régénérer le formulaire
@@ -251,6 +314,16 @@ class ContratLocation(models.Model):
     )
     extrait_remboursement = models.CharField(
         "N° d'extrait (remboursement)", max_length=30, blank=True
+    )
+
+    # --- Signature du délégué (image de la collection « Signature ») ------
+    signature = models.ForeignKey(
+        "wagtailimages.Image",
+        verbose_name="Signature du délégué",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
     )
 
     # --- Annulation de la location --------------------------------------
@@ -369,3 +442,36 @@ class AnnexeContrat(models.Model):
 
     def __str__(self):
         return self.titre
+
+
+class MiseEnPageContrat(models.Model):
+    """Réglages de mise en page du contrat de location (enregistrement
+    unique), modifiables depuis la page « Contrat-type de location »."""
+
+    image_entete = models.ImageField(
+        "Image de fond de l'en-tête",
+        upload_to="contrat_mise_en_page/",
+        blank=True,
+        help_text=(
+            "Affichée en bandeau en haut de la première page, derrière le nom de "
+            "l'ASBL. Format paysage conseillé (environ 2000 × 450 pixels)."
+        ),
+    )
+    eclaircir_entete = models.BooleanField(
+        "Éclaircir l'image pour garder le texte lisible",
+        default=True,
+    )
+    date_modification = models.DateTimeField("Dernière modification", auto_now=True)
+
+    class Meta:
+        verbose_name = "Mise en page du contrat"
+        verbose_name_plural = "Mise en page du contrat"
+
+    def __str__(self):
+        return "Mise en page du contrat de location"
+
+    @classmethod
+    def charger(cls):
+        """Renvoie l'unique enregistrement de mise en page (créé au besoin)."""
+        objet, _ = cls.objects.get_or_create(pk=1)
+        return objet

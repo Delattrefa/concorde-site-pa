@@ -30,8 +30,17 @@ from django.utils.dates import MONTHS, WEEKDAYS
 from django.utils import timezone
 
 from .contrats import VARIABLES_DISPONIBLES, AIDE_MISE_EN_FORME, generer_pdf_contrat, nom_fichier_contrat
-from .forms import ActiviteForm, AnnexeContratForm, ReservationAdminForm, SuiviPaiementFormSet, ArticleContratForm, ContratLocationForm, ReservationForm
-from .models import Activite, AnnexeContrat, ArticleContrat, ContratLocation, Reservation
+from .forms import ActiviteForm, AnnexeContratForm, MiseEnPageContratForm, ReservationAdminForm, SuiviPaiementFormSet, images_de_signature, ArticleContratForm, ContratLocationForm, ReservationForm
+from .models import (
+    Activite,
+    AnnexeContrat,
+    ArticleContrat,
+    ContratLocation,
+    MiseEnPageContrat,
+    Reservation,
+    demandes_en_attente_sur,
+    occupations_sur,
+)
 from .utils import construire_semaines_du_mois, mois_adjacent
 
 
@@ -239,11 +248,31 @@ class ActiviteDeleteView(LoginRequiredMixin, ActivitePermissionMixin, DeleteView
     login_url = "login"
     context_object_name = "activite"
 
+    def form_valid(self, form):
+        debut, fin = self.object.date_debut, self.object.date_fin
+        reponse = super().form_valid(form)
+        if _est_administrateur(self.request.user):
+            _signaler_liste_attente(self.request, debut, fin)
+        return reponse
+
     def get_success_url(self):
         messages.success(self.request, "L'activité a bien été supprimée.")
         return reverse(
             "calendrier:mois",
             kwargs={"annee": self.object.date_debut.year, "mois": self.object.date_debut.month},
+        )
+
+
+def _signaler_liste_attente(request, debut, fin, exclure=None):
+    """Après une libération de dates (annulation, suppression), signale à
+    l'administrateur les demandes en attente qui peuvent être validées."""
+    en_attente = list(demandes_en_attente_sur(debut, fin, exclure))
+    if en_attente:
+        noms = ", ".join(f"{r.prenom} {r.nom}" for r in en_attente[:5])
+        messages.info(
+            request,
+            f"{len(en_attente)} demande(s) en attente sur ces dates : {noms}. "
+            "Vous pouvez maintenant la ou les valider dans « Gérer les demandes de réservation ».",
         )
 
 
@@ -323,11 +352,19 @@ class ReservationAdminCreateView(UserPassesTestMixin, CreateView):
             form.instance.traite_par = self.request.user
             form.instance.date_traitement = timezone.now()
         reponse = super().form_valid(form)
-        messages.success(
-            self.request,
-            f"La réservation de {self.object.prenom} {self.object.nom} a été enregistrée "
-            f"({self.object.get_statut_display().lower()}).",
-        )
+        if form.mise_en_attente:
+            messages.warning(
+                self.request,
+                f"La salle est déjà occupée à ces dates ({' ; '.join(form.mise_en_attente)}). "
+                f"La réservation de {self.object.prenom} {self.object.nom} a été enregistrée "
+                "EN ATTENTE : elle pourra être validée si la date se libère.",
+            )
+        else:
+            messages.success(
+                self.request,
+                f"La réservation de {self.object.prenom} {self.object.nom} a été enregistrée "
+                f"({self.object.get_statut_display().lower()}).",
+            )
         return reponse
 
     def get_success_url(self):
@@ -350,8 +387,20 @@ class ReservationUpdateView(UserPassesTestMixin, UpdateView):
     def test_func(self):
         return _est_administrateur(self.request.user)
 
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["mode"] = "admin"
+        return kwargs
+
     def form_valid(self, form):
-        messages.success(self.request, "La réservation a bien été modifiée.")
+        if form.mise_en_attente:
+            messages.warning(
+                self.request,
+                f"La salle est déjà occupée à ces dates ({' ; '.join(form.mise_en_attente)}) : "
+                "la réservation a été modifiée et remise EN ATTENTE.",
+            )
+        else:
+            messages.success(self.request, "La réservation a bien été modifiée.")
         return super().form_valid(form)
 
     def get_success_url(self):
@@ -409,6 +458,16 @@ def reservation_traiter(request, pk):
     action = request.POST.get("action")
 
     if action == "valider":
+        occupations = occupations_sur(
+            reservation.date_debut, reservation.date_fin, exclure_reservation=reservation.pk
+        )
+        if occupations:
+            messages.error(
+                request,
+                "Impossible de valider : la salle est déjà occupée à ces dates ("
+                + " ; ".join(occupations) + "). La demande reste en attente.",
+            )
+            return redirect(_url_retour_reservation(request))
         reservation.statut = Reservation.STATUT_VALIDEE
         messages.success(
             request,
@@ -442,14 +501,15 @@ def reservation_traiter(request, pk):
                 "la salle est de nouveau libre dans le calendrier.",
             )
     elif action == "retablir" and reservation.statut == Reservation.STATUT_ANNULEE:
-        conflit = Reservation.objects.filter(
-            statut=Reservation.STATUT_VALIDEE,
-            date_debut__lte=reservation.date_fin,
-            date_fin__gte=reservation.date_debut,
-        ).exclude(pk=reservation.pk).first()
+        occupations = occupations_sur(
+            reservation.date_debut, reservation.date_fin, exclure_reservation=reservation.pk
+        )
         contrat = getattr(reservation, "contrat", None)
-        if conflit:
-            messages.error(request, f"Impossible de rétablir : la salle a été réservée entre-temps ({conflit}).")
+        if occupations:
+            messages.error(
+                request,
+                "Impossible de rétablir : la salle est occupée entre-temps (" + " ; ".join(occupations) + ").",
+            )
             return redirect(_url_retour_reservation(request))
         if contrat is not None and (contrat.loyer_rembourse or contrat.caution_rendue_annulation):
             messages.error(
@@ -472,6 +532,9 @@ def reservation_traiter(request, pk):
     reservation.traite_par = request.user
     reservation.date_traitement = timezone.now()
     reservation.save()
+
+    if action == "annuler":
+        _signaler_liste_attente(request, reservation.date_debut, reservation.date_fin, exclure=reservation.pk)
 
     return redirect(_url_retour_reservation(request))
 
@@ -498,8 +561,13 @@ class ReservationDeleteView(UserPassesTestMixin, DeleteView):
         return _est_administrateur(self.request.user)
 
     def form_valid(self, form):
+        etait_validee = self.object.statut == Reservation.STATUT_VALIDEE
+        debut, fin, pk = self.object.date_debut, self.object.date_fin, self.object.pk
         messages.success(self.request, "La demande de réservation a été supprimée.")
-        return super().form_valid(form)
+        reponse = super().form_valid(form)
+        if etait_validee:
+            _signaler_liste_attente(self.request, debut, fin, exclure=pk)
+        return reponse
 
 
 @user_passes_test(_est_administrateur, login_url="login")
@@ -543,12 +611,26 @@ def rediger_contrat(request, reservation_pk):
             reponse["Content-Disposition"] = f'attachment; filename="{nom_fichier}"'
             return reponse
     else:
-        form = ContratLocationForm(instance=contrat)
+        initial = {}
+        if contrat is None:
+            # Nouveau contrat : on propose la dernière signature utilisée.
+            precedent = (
+                ContratLocation.objects.filter(signature__isnull=False)
+                .order_by("-date_creation").first()
+            )
+            if precedent:
+                initial["signature"] = precedent.signature_id
+        form = ContratLocationForm(instance=contrat, initial=initial)
 
     return render(
         request,
         "calendrier/contrat_form.html",
-        {"form": form, "reservation": reservation, "contrat": contrat},
+        {
+            "form": form,
+            "reservation": reservation,
+            "contrat": contrat,
+            "signatures": form.fields["signature"].queryset,
+        },
     )
 
 
@@ -620,6 +702,7 @@ def apercu_modele_contrat(request):
         delegue_prenom="Prénom", delegue_nom="NOM DU DÉLÉGUÉ",
         montant_location=0, montant_caution=150,
         locaux_selectionnes=lambda: ["Une salle des fêtes et une scène", "Cuisine équipée"],
+        signature=images_de_signature().first(),
     )
     contenu_pdf = generer_pdf_contrat(reservation, contrat)
     reponse = HttpResponse(contenu_pdf, content_type="application/pdf")
@@ -808,7 +891,14 @@ def suivi_paiements(request):
     if request.method == "POST":
         formset = SuiviPaiementFormSet(request.POST, queryset=contrats)
         if formset.is_valid():
+            nouvelles_annulations = [
+                f.instance for f in formset.forms
+                if f.has_changed() and "annule" in f.changed_data and f.cleaned_data.get("annule")
+            ]
             modifies = formset.save()
+            for contrat in nouvelles_annulations:
+                r = contrat.reservation
+                _signaler_liste_attente(request, r.date_debut, r.date_fin, exclure=r.pk)
             if modifies:
                 messages.success(
                     request,
@@ -845,4 +935,24 @@ def suivi_paiements(request):
         "recherche_active": recherche_active,
         "params_recherche": params_recherche,
         "nb_resultats": contrats.count(),
+    })
+
+
+@user_passes_test(_est_administrateur, login_url="login")
+def mise_en_page_contrat(request):
+    """Image de fond de l'en-tête du contrat de location."""
+    mise_en_page = MiseEnPageContrat.charger()
+    if request.method == "POST":
+        form = MiseEnPageContratForm(request.POST, request.FILES, instance=mise_en_page)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "La mise en page du contrat a été enregistrée.")
+            return redirect(_url_modele_contrat(request))
+    else:
+        form = MiseEnPageContratForm(instance=mise_en_page)
+    return render(request, "calendrier/mise_en_page_contrat.html", {
+        "form": form,
+        "mise_en_page": mise_en_page,
+        "url_retour": _url_modele_contrat(request),
+        "reservation_retour": _reservation_de_retour(request),
     })
